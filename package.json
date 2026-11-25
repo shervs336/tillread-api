@@ -1,0 +1,46 @@
+{
+  "name": "tillread-api",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "openapi": "tsx scripts/openapi.ts",
+    "sdk": "npm run openapi && npm run generate -w @tillread/api-client",
+    "loadtest": "node scripts/loadtest.mjs",
+    "schema": "node scripts/schema.mjs",
+    "pretest": "node scripts/schema.mjs",
+    "prebuild": "node scripts/schema.mjs"
+  },
+  "dependencies": {
+    "@electric-sql/pglite": "0.6.0",
+    "@hono/zod-openapi": "1.6.3",
+    "hono": "4.13.21",
+    "next": "16.4.6",
+    "postgres": "4.1.1",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "tillread": "file:vendor/tillread",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite-socket": "^0.3.0",
+    "@tailwindcss/turbopack": "4.3.3",
+    "@types/node": "^22",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "autocannon": "9.0.0",
+    "eslint": "^9",
+    "eslint-config-next": "16.4.6",
+    "tailwindcss": "4.3.3",
+    "tsx": "^4.23.15",
+    "typescript": "^5",
+    "vitest": "^5.1.1"
+  }
+}

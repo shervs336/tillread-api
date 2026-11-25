@@ -1,0 +1,1532 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Tillread API",
+    "version": "1.0.0",
+    "description": "Bank CSV in, clean JSON out. The Tillread API reads exports from any bank (any delimiter, encoding, date order, decimal style or sign convention) and returns typed transactions: ISO dates, amounts in integer cents, money out negative.\n\nIt's built on the open-source [tillread](https://github.com/shervs336/tillread) library.\n\n## Quick start\n\n1. Open the [console](/console) and create an API key. You'll see it once.\n2. Send a file:\n\n```bash\ncurl https://tillread-api.vercel.app/v1/parse \\\n  -H \"Authorization: Bearer $TILLREAD_KEY\" \\\n  -H \"Content-Type: text/csv\" \\\n  --data-binary @statement.csv\n```\n\n## Authentication\n\nEvery `/v1` request except `/v1/health` needs `Authorization: Bearer tr_live_…`. Keys are stored only as SHA-256 hashes, so a lost key can't be shown again: revoke it and create another.\n\n## Limits\n\n| | Limit |\n|---|---|\n| Requests | 60 a minute (burst), 1,000 a day per key |\n| Jobs | 100 a day per key |\n| `POST /v1/parse` | 1 MB per file |\n| `POST /v1/jobs` | 4 MB per file |\n\nEvery response carries `RateLimit-Policy` and `RateLimit` headers (IETF draft), plus `X-RateLimit-*`. A `429` includes `Retry-After` in seconds.\n\n## Errors\n\nErrors are [Problem Details](https://www.rfc-editor.org/rfc/rfc9457) with `Content-Type: application/problem+json`:\n\n```json\n{\n  \"type\": \"https://tillread-api.vercel.app/docs#errors-rate_limited\",\n  \"title\": \"Too many requests\",\n  \"status\": 429,\n  \"detail\": \"This key allows 60 requests a minute. Try again in 3s.\",\n  \"code\": \"rate_limited\",\n  \"request_id\": \"req_8fK2mQx9TzLw\"\n}\n```\n\nBranch on `code`, which is stable. Every response has an `X-Request-Id`; include it if you report a problem.\n\n| code | status |\n|---|---|\n| `missing_api_key`, `invalid_api_key`, `revoked_api_key` | 401 |\n| `not_found` | 404 |\n| `job_not_ready` | 409 |\n| `payload_too_large` | 413 |\n| `unsupported_media_type` | 415 |\n| `validation_error`, `empty_file`, `idempotency_key_reused`, `invalid_url`, `insecure_url`, `private_url` | 422 |\n| `rate_limited`, `quota_exceeded` | 429 |\n| `internal_error` | 500 |\n\n## Idempotency\n\nSend `Idempotency-Key: <any unique string>` with `POST /v1/jobs`. If the network drops and you retry, you get the original job back (status `200` with `Idempotent-Replayed: true`) instead of a second job. Reusing a key for a different file returns `422 idempotency_key_reused`.\n\n## Webhooks\n\nCreate an endpoint (public HTTPS only) and Tillread will `POST` an event when a job finishes:\n\n```json\n{ \"id\": \"evt_…\", \"type\": \"job.succeeded\", \"created\": 1767312000, \"data\": { \"id\": \"job_…\", \"status\": \"succeeded\", \"summary\": { … } } }\n```\n\nEach request is signed: `Tillread-Signature: t=<unix seconds>,v1=<hex>`, where `v1` is HMAC-SHA256 of `\"<t>.<raw body>\"` with your endpoint's secret. Reject requests whose timestamp is more than five minutes old. The `@tillread/api-client` package has `verifyWebhook()`; in plain Node:\n\n```js\nimport { createHmac, timingSafeEqual } from \"node:crypto\";\n\nfunction verify(secret, rawBody, header) {\n  const { t, v1 } = Object.fromEntries(header.split(\",\").map((p) => p.split(\"=\")));\n  if (Math.abs(Date.now() / 1000 - Number(t)) > 300) return false;\n  const expected = createHmac(\"sha256\", secret).update(`${t}.${rawBody}`).digest(\"hex\");\n  return v1.length === expected.length && timingSafeEqual(Buffer.from(v1), Buffer.from(expected));\n}\n```\n\nRespond with any `2xx` within 10 seconds. Anything else is retried after 30 s, 2 min, 10 min, 1 h and 6 h, then marked failed; you can redeliver from the console. Deliveries can arrive more than once or out of order, so use the event `id` to ignore repeats.\n",
+    "license": {
+      "name": "MIT",
+      "url": "https://opensource.org/license/mit"
+    }
+  },
+  "servers": [
+    {
+      "url": "https://tillread-api.vercel.app",
+      "description": "Production"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Parse",
+      "description": "Read a file and get the transactions back in the same request."
+    },
+    {
+      "name": "Jobs",
+      "description": "Queue bigger files and get them back by polling or webhook."
+    },
+    {
+      "name": "Webhooks",
+      "description": "Be told when a job finishes."
+    },
+    {
+      "name": "Account",
+      "description": "Usage and limits."
+    },
+    {
+      "name": "Meta"
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "An API key from the console: `Authorization: Bearer tr_live_…`"
+      }
+    },
+    "schemas": {
+      "ParseResult": {
+        "type": "object",
+        "properties": {
+          "transactions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Transaction"
+            }
+          },
+          "skipped": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "line": {
+                  "type": "integer"
+                },
+                "reason": {
+                  "type": "string",
+                  "enum": [
+                    "date",
+                    "amount",
+                    "zero"
+                  ]
+                },
+                "message": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "line",
+                "reason",
+                "message"
+              ]
+            }
+          },
+          "detection": {
+            "$ref": "#/components/schemas/Detection"
+          },
+          "summary": {
+            "$ref": "#/components/schemas/Summary"
+          }
+        },
+        "required": [
+          "transactions",
+          "skipped",
+          "detection",
+          "summary"
+        ]
+      },
+      "Transaction": {
+        "type": "object",
+        "properties": {
+          "date": {
+            "type": "string",
+            "example": "2026-01-02"
+          },
+          "amount": {
+            "type": "integer",
+            "example": -450,
+            "description": "Minor units (cents). Negative is money out."
+          },
+          "description": {
+            "type": "string",
+            "example": "Blue Bottle Coffee"
+          },
+          "memo": {
+            "type": "string"
+          },
+          "balance": {
+            "type": "integer"
+          },
+          "currency": {
+            "type": "string",
+            "example": "USD"
+          },
+          "category": {
+            "type": "string"
+          },
+          "reference": {
+            "type": "string"
+          },
+          "line": {
+            "type": "integer",
+            "example": 2
+          }
+        },
+        "required": [
+          "date",
+          "amount",
+          "description",
+          "line"
+        ]
+      },
+      "Detection": {
+        "type": "object",
+        "properties": {
+          "delimiter": {
+            "type": "string"
+          },
+          "headerRow": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "headers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "columns": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
+            }
+          },
+          "dateFormat": {
+            "type": "string",
+            "enum": [
+              "YMD",
+              "DMY",
+              "MDY"
+            ]
+          },
+          "decimal": {
+            "type": "string",
+            "enum": [
+              ".",
+              ","
+            ]
+          },
+          "sign": {
+            "type": "string",
+            "enum": [
+              "signed",
+              "inverted",
+              "split",
+              "direction"
+            ]
+          },
+          "order": {
+            "type": "string",
+            "enum": [
+              "ascending",
+              "descending",
+              "unknown"
+            ]
+          },
+          "confidence": {
+            "type": "number",
+            "example": 0.95
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "delimiter",
+          "headerRow",
+          "headers",
+          "columns",
+          "dateFormat",
+          "decimal",
+          "sign",
+          "order",
+          "confidence",
+          "notes",
+          "warnings"
+        ]
+      },
+      "Summary": {
+        "type": "object",
+        "properties": {
+          "transactions": {
+            "type": "integer"
+          },
+          "skipped": {
+            "type": "integer"
+          },
+          "money_in": {
+            "type": "integer"
+          },
+          "money_out": {
+            "type": "integer"
+          },
+          "first_date": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_date": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "confidence": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "transactions",
+          "skipped",
+          "money_in",
+          "money_out",
+          "first_date",
+          "last_date",
+          "confidence"
+        ]
+      },
+      "Problem": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "format": "uri",
+            "example": "https://tillread-api.vercel.app/docs#errors-rate_limited"
+          },
+          "title": {
+            "type": "string",
+            "example": "Too many requests"
+          },
+          "status": {
+            "type": "integer",
+            "example": 429
+          },
+          "detail": {
+            "type": "string",
+            "example": "This key allows 60 requests a minute. Try again in 3s."
+          },
+          "code": {
+            "type": "string",
+            "example": "rate_limited"
+          },
+          "request_id": {
+            "type": "string",
+            "example": "req_8fK2mQx9TzLw"
+          }
+        },
+        "required": [
+          "type",
+          "title",
+          "status",
+          "code",
+          "request_id"
+        ],
+        "description": "An error, as Problem Details for HTTP APIs (RFC 9457)."
+      },
+      "ParseRequest": {
+        "type": "object",
+        "properties": {
+          "csv": {
+            "type": "string",
+            "minLength": 1,
+            "example": "Date,Description,Amount\n2026-01-02,Coffee,-4.50\n"
+          },
+          "options": {
+            "type": "object",
+            "properties": {
+              "date_format": {
+                "type": "string",
+                "enum": [
+                  "YMD",
+                  "DMY",
+                  "MDY"
+                ],
+                "description": "Force the date order instead of detecting it."
+              },
+              "decimal": {
+                "type": "string",
+                "enum": [
+                  ".",
+                  ","
+                ],
+                "description": "Force the decimal separator."
+              },
+              "sign": {
+                "type": "string",
+                "enum": [
+                  "signed",
+                  "inverted",
+                  "split",
+                  "direction"
+                ],
+                "description": "Force the sign convention."
+              },
+              "delimiter": {
+                "type": "string",
+                "enum": [
+                  ",",
+                  ";",
+                  "tab",
+                  "|"
+                ]
+              },
+              "minor_units": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0,
+                "maximum": 4,
+                "description": "Digits after the decimal point. Default 2."
+              }
+            }
+          }
+        },
+        "required": [
+          "csv"
+        ]
+      },
+      "Job": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "example": "job_3kTq9VwZp2Lx8NcR4bYe"
+          },
+          "object": {
+            "type": "string",
+            "enum": [
+              "job"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "processing",
+              "succeeded",
+              "failed"
+            ]
+          },
+          "filename": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "bytes": {
+            "type": "integer"
+          },
+          "options": {
+            "type": "object",
+            "additionalProperties": {}
+          },
+          "summary": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Summary"
+              },
+              {
+                "type": [
+                  "object",
+                  "null"
+                ]
+              }
+            ]
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "started_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "finished_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "object",
+          "status",
+          "filename",
+          "bytes",
+          "options",
+          "summary",
+          "error",
+          "created_at",
+          "started_at",
+          "finished_at"
+        ]
+      },
+      "JobList": {
+        "type": "object",
+        "properties": {
+          "object": {
+            "type": "string",
+            "enum": [
+              "list"
+            ]
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Job"
+            }
+          },
+          "has_more": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "object",
+          "data",
+          "has_more"
+        ]
+      },
+      "Usage": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "prefix": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "prefix"
+            ]
+          },
+          "limits": {
+            "type": "object",
+            "properties": {
+              "requests_per_minute": {
+                "type": "integer"
+              },
+              "requests_per_day": {
+                "type": "integer"
+              },
+              "jobs_per_day": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "requests_per_minute",
+              "requests_per_day",
+              "jobs_per_day"
+            ]
+          },
+          "days": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "day": {
+                  "type": "string"
+                },
+                "requests": {
+                  "type": "integer"
+                },
+                "rows_parsed": {
+                  "type": "integer"
+                },
+                "jobs": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "day",
+                "requests",
+                "rows_parsed",
+                "jobs"
+              ]
+            }
+          }
+        },
+        "required": [
+          "key",
+          "limits",
+          "days"
+        ]
+      },
+      "WebhookEndpoint": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "example": "we_9QmV2tXc8RkLp4ZsHn1a"
+          },
+          "url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "secret": {
+            "type": "string",
+            "description": "Only returned when the endpoint is created. Use it to verify signatures."
+          }
+        },
+        "required": [
+          "id",
+          "url",
+          "events",
+          "description",
+          "created_at"
+        ]
+      },
+      "CreateWebhookEndpoint": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "format": "uri",
+            "example": "https://example.com/webhooks/tillread"
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "job.succeeded",
+                "job.failed"
+              ]
+            },
+            "description": "Defaults to both."
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 120
+          }
+        },
+        "required": [
+          "url"
+        ]
+      }
+    },
+    "parameters": {}
+  },
+  "paths": {
+    "/v1/health": {
+      "get": {
+        "tags": [
+          "Meta"
+        ],
+        "summary": "Health check",
+        "description": "No key needed. Checks the database too.",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "ok"
+                      ]
+                    },
+                    "time": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "time"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/parse": {
+      "post": {
+        "tags": [
+          "Parse"
+        ],
+        "summary": "Parse a CSV now",
+        "description": "Reads a bank CSV (up to 1 MB) and returns the transactions. Send the raw file in any encoding, or JSON with a `csv` string. For bigger files, or to be notified by webhook, create a job instead.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "YMD",
+                "DMY",
+                "MDY"
+              ],
+              "description": "Force the date order instead of detecting it."
+            },
+            "required": false,
+            "description": "Force the date order instead of detecting it.",
+            "name": "date_format",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                ".",
+                ","
+              ],
+              "description": "Force the decimal separator."
+            },
+            "required": false,
+            "description": "Force the decimal separator.",
+            "name": "decimal",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "signed",
+                "inverted",
+                "split",
+                "direction"
+              ],
+              "description": "Force the sign convention."
+            },
+            "required": false,
+            "description": "Force the sign convention.",
+            "name": "sign",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                ",",
+                ";",
+                "tab",
+                "|"
+              ]
+            },
+            "required": false,
+            "name": "delimiter",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0,
+              "maximum": 4,
+              "description": "Digits after the decimal point. Default 2."
+            },
+            "required": false,
+            "description": "Digits after the decimal point. Default 2.",
+            "name": "minor_units",
+            "in": "query"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "text/csv": {
+              "schema": {
+                "type": "string",
+                "format": "binary",
+                "example": "Date,Description,Amount\n2026-01-02,Coffee,-4.50\n"
+              }
+            },
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            },
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ParseRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Transactions, skipped rows and how the file was read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ParseResult"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, invalid or revoked API key",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "File too large",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Unsupported content type",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The request was invalid",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit or daily quota reached",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/jobs": {
+      "post": {
+        "tags": [
+          "Jobs"
+        ],
+        "summary": "Create a parse job",
+        "description": "Queues a file (up to 4 MB) and returns at once. Poll the job, or subscribe a webhook endpoint to `job.succeeded` and `job.failed`. Send an `Idempotency-Key` header so a retried request never creates a second job.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "YMD",
+                "DMY",
+                "MDY"
+              ],
+              "description": "Force the date order instead of detecting it."
+            },
+            "required": false,
+            "description": "Force the date order instead of detecting it.",
+            "name": "date_format",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                ".",
+                ","
+              ],
+              "description": "Force the decimal separator."
+            },
+            "required": false,
+            "description": "Force the decimal separator.",
+            "name": "decimal",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "signed",
+                "inverted",
+                "split",
+                "direction"
+              ],
+              "description": "Force the sign convention."
+            },
+            "required": false,
+            "description": "Force the sign convention.",
+            "name": "sign",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                ",",
+                ";",
+                "tab",
+                "|"
+              ]
+            },
+            "required": false,
+            "name": "delimiter",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0,
+              "maximum": 4,
+              "description": "Digits after the decimal point. Default 2."
+            },
+            "required": false,
+            "description": "Digits after the decimal point. Default 2.",
+            "name": "minor_units",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "required": false,
+            "name": "filename",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 200,
+              "example": "import-2026-01-statement"
+            },
+            "required": false,
+            "name": "idempotency-key",
+            "in": "header"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "text/csv": {
+              "schema": {
+                "type": "string",
+                "format": "binary",
+                "example": "Date,Description,Amount\n2026-01-02,Coffee,-4.50\n"
+              }
+            },
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            },
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ParseRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Replayed: this Idempotency-Key was already used for the same request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Job"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Queued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Job"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, invalid or revoked API key",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "File too large",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The request was invalid",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit or daily quota reached",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "Jobs"
+        ],
+        "summary": "List jobs",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20
+            },
+            "required": false,
+            "name": "limit",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "starting_after",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobList"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, invalid or revoked API key",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The request was invalid",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit or daily quota reached",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/jobs/{id}": {
+      "get": {
+        "tags": [
+          "Jobs"
+        ],
+        "summary": "Get a job",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^job_[0-9A-Za-z]{20}$",
+              "example": "job_3kTq9VwZp2Lx8NcR4bYe"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The job, with a summary once it has succeeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Job"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, invalid or revoked API key",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such job for this key",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The request was invalid",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit or daily quota reached",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/jobs/{id}/result": {
+      "get": {
+        "tags": [
+          "Jobs"
+        ],
+        "summary": "Get a job's transactions",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^job_[0-9A-Za-z]{20}$",
+              "example": "job_3kTq9VwZp2Lx8NcR4bYe"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Same shape as POST /v1/parse",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ParseResult"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, invalid or revoked API key",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such job for this key",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The job hasn't succeeded",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The request was invalid",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit or daily quota reached",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/usage": {
+      "get": {
+        "tags": [
+          "Account"
+        ],
+        "summary": "Usage for this key",
+        "description": "Requests, rows parsed and jobs per UTC day for the last 30 days, and the limits that apply.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Usage",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Usage"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, invalid or revoked API key",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The request was invalid",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit or daily quota reached",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/webhook-endpoints": {
+      "get": {
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "List webhook endpoints",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Endpoints",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "object": {
+                      "type": "string",
+                      "enum": [
+                        "list"
+                      ]
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/WebhookEndpoint"
+                      }
+                    }
+                  },
+                  "required": [
+                    "object",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, invalid or revoked API key",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The request was invalid",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit or daily quota reached",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "Create a webhook endpoint",
+        "description": "The URL must be public HTTPS. The response includes the signing `secret`, shown only this once.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateWebhookEndpoint"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookEndpoint"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, invalid or revoked API key",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The request was invalid",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit or daily quota reached",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/webhook-endpoints/{id}": {
+      "delete": {
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "Delete a webhook endpoint",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^we_[0-9A-Za-z]{20}$"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "401": {
+            "description": "Missing, invalid or revoked API key",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The request was invalid",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit or daily quota reached",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "webhooks": {}
+}

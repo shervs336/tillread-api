@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - name: Integration tests (PGlite, postgres.js over the wire, SDK)
+        run: npm test
+      - name: OpenAPI spec and SDK types are up to date
+        run: |
+          npm run sdk
+          git diff --exit-code -- openapi.json packages/api-client/src/schema.d.ts
+      - run: npm run build

@@ -1,0 +1,129 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  --bg: #f6f4ef;
+  --surface: #fffdf9;
+  --surface-2: #f0ede5;
+  --ink: #1a1915;
+  --muted: #66635a;
+  --line: #e2ded2;
+  --line-strong: #cfcabb;
+  --accent: #0d6a4e;
+  --accent-soft: #e2f0e9;
+  --accent-ink: #ffffff;
+  --neg: #b3372c;
+  --pos: #0d6a4e;
+  --warn: #8f5a00;
+  --warn-soft: #fbf0d9;
+  --code-bg: #1b1c18;
+  --code-ink: #ecebe3;
+  --role-date: #2f66c2;
+  --role-amount: #0d6a4e;
+  --role-desc: #8a4fbf;
+  --role-balance: #b0661c;
+  --role-other: #66635a;
+  color-scheme: light;
+}
+
+.dark {
+  --bg: #0f100e;
+  --surface: #171815;
+  --surface-2: #1f211c;
+  --ink: #eeece4;
+  --muted: #a29f94;
+  --line: #2b2d27;
+  --line-strong: #3b3e35;
+  --accent: #52d3a3;
+  --accent-soft: #15302a;
+  --accent-ink: #0f100e;
+  --neg: #ff8a7a;
+  --pos: #52d3a3;
+  --warn: #f0b44c;
+  --warn-soft: #33270f;
+  --code-bg: #121310;
+  --code-ink: #e6e4db;
+  --role-date: #7fb0ff;
+  --role-amount: #52d3a3;
+  --role-desc: #c79bf0;
+  --role-balance: #f0a860;
+  --role-other: #a29f94;
+  color-scheme: dark;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-accent: var(--accent);
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-ink: var(--accent-ink);
+  --color-neg: var(--neg);
+  --color-pos: var(--pos);
+  --color-warn: var(--warn);
+  --color-warn-soft: var(--warn-soft);
+  --color-code-bg: var(--code-bg);
+  --color-code-ink: var(--code-ink);
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-serif: var(--font-instrument-serif), ui-serif, Georgia, serif;
+}
+
+html {
+  background: var(--bg);
+  scroll-behavior: smooth;
+  scroll-padding-top: 5rem;
+}
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: var(--accent-soft);
+  color: var(--ink);
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* A torn receipt edge for the hero cards. */
+.receipt-edge {
+  --tooth: 10px;
+  mask:
+    conic-gradient(from -45deg at bottom, #0000, #000 1deg 89deg, #0000 90deg) 50% / var(--tooth) 100%;
+  padding-bottom: calc(var(--tooth) / 2 + 1.25rem);
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+.grid-paper {
+  background-image: linear-gradient(var(--line) 1px, transparent 1px), linear-gradient(90deg, var(--line) 1px, transparent 1px);
+  background-size: 32px 32px;
+  mask-image: radial-gradient(ellipse at top, #000 20%, transparent 70%);
+}
